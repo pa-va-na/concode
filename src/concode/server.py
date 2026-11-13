@@ -1,4 +1,6 @@
+import argparse
 import asyncio
+import json
 
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -8,6 +10,7 @@ class Room:
     def __init__(self):
         self.clients = set()
         self.history = []  # every operation (as text), in the order the server received it
+        self.seeded = False  # has someone already been allowed to load a file into this room?
 
 
 rooms: dict[str, Room] = {}
@@ -26,7 +29,23 @@ async def handler(websocket):
 
     try:
         async for message in websocket:
-            room.history.append(message)
+            try:
+                kind = json.loads(message).get("type")
+            except (ValueError, AttributeError):
+                continue  # not valid JSON: ignore it
+
+            if kind == "seed_request":
+                # "May I load my file into this room?" Only the first asker, and
+                # only if the room is still empty, gets a yes.
+                granted = not room.history and not room.seeded
+                if granted:
+                    room.seeded = True
+                await websocket.send(json.dumps({"type": "seed", "granted": granted}))
+                continue
+
+            if kind in ("insert", "delete"):
+                room.history.append(message)  # edits are remembered for late joiners
+            # anything else (like run output) is passed on but not remembered
             for other in list(room.clients):
                 if other is not websocket:
                     try:
@@ -39,11 +58,25 @@ async def handler(websocket):
         room.clients.discard(websocket)
 
 
-async def main(port: int = 8765):
-    async with serve(handler, "localhost", port):
-        print(f"Concode server running on ws://localhost:{port}")
+async def run(host: str = "localhost", port: int = 8765) -> None:
+    async with serve(handler, host, port):
+        print(f"Concode server running on ws://{host}:{port}")
         await asyncio.Future()
 
 
+# Kept so older code and tests can still call server.main(port)
+async def main(port: int = 8765) -> None:
+    await run("localhost", port)
+
+
+def cli() -> None:
+    parser = argparse.ArgumentParser(description="Run a Concode server.")
+    parser.add_argument("--host", default="localhost",
+                        help="address to listen on (use 0.0.0.0 to accept other computers)")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    asyncio.run(run(args.host, args.port))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()
